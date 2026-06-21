@@ -42,6 +42,7 @@ async function run() {
     const db = client.db('bibliodrop_db');
     const booksCollection = db.collection('books');
     const paymentCollection = db.collection('payments');
+    const usersCollection = db.collection('user');
 
     // books related api for all books with search, category, price, availability
     app.get('/api/books', async (req, res) => {
@@ -96,7 +97,7 @@ async function run() {
           sortObj.title = order === 'desc' ? -1 : 1;
         } else {
           sortObj[sort === 'createdAt' ? 'dateAdded' : sort] =
-            order === 'desc' ? 1 : 1;
+            order === 'desc' ? -1 : 1;
         }
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -218,6 +219,8 @@ async function run() {
           coverImage,
           status,
           librarianEmail,
+          librarianName,
+          userId,
         } = req.body;
 
         // 1. Server-side validation for required fields
@@ -239,7 +242,11 @@ async function run() {
           deliveryFee: parseFloat(deliveryFee) || 0,
           coverImage,
           status: status || 'Pending Approval',
-          librarianEmail: librarianEmail ? librarianEmail.trim().toLowerCase() : null, 
+          librarianEmail: librarianEmail
+            ? librarianEmail.trim().toLowerCase()
+            : null,
+          librarianName: librarianName || 'System Librarian',
+          userId: userId || null,
           dateAdded: new Date(),
         };
 
@@ -264,165 +271,369 @@ async function run() {
 
     // book update, delete actions api
     // DELETE: Book delete
-app.delete('/api/books/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid book ID.' });
-    }
+    app.delete('/api/books/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid book ID.' });
+        }
 
-    const result = await booksCollection.deleteOne({ _id: new ObjectId(id) });
+        const result = await booksCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
 
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ success: false, message: 'Book not found.' });
-    }
+        if (result.deletedCount === 0) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'Book not found.' });
+        }
 
-    res.json({ success: true, message: 'Book deleted successfully.' });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Failed to delete book.', error: error.message });
-  }
-});
+        res.json({ success: true, message: 'Book deleted successfully.' });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to delete book.',
+          error: error.message,
+        });
+      }
+    });
 
-// PATCH: Book status toggle (Published <-> Unpublished)
-app.patch('/api/books/:id/status', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
+    // PATCH: Book status toggle (Published <-> Unpublished)
+    app.patch('/api/books/:id/status', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body;
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid book ID.' });
-    }
+        if (!ObjectId.isValid(id)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid book ID.' });
+        }
 
-    const validStatuses = ['Published', 'Unpublished'];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({ success: false, message: 'Invalid status.' });
-    }
+        const validStatuses = ['Published', 'Unpublished'];
+        if (!validStatuses.includes(status)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid status.' });
+        }
 
-    const result = await booksCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { status, updatedAt: new Date() } }
-    );
+        const result = await booksCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status, updatedAt: new Date() } },
+        );
 
-    if (result.modifiedCount === 0) {
-      return res.status(404).json({ success: false, message: 'Book not found.' });
-    }
+        if (result.modifiedCount === 0) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'Book not found.' });
+        }
 
-    res.json({ success: true, message: `Book ${status} successfully.` });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Failed to update status.', error: error.message });
-  }
-});
+        res.json({ success: true, message: `Book ${status} successfully.` });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update status.',
+          error: error.message,
+        });
+      }
+    });
 
-// PATCH: Book edit/update
-app.patch('/api/books/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).json({ success: false, message: 'Invalid book ID.' });
-    }
+    // PATCH: Book edit/update
+    app.patch('/api/books/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid book ID.' });
+        }
 
-    const { title, author, description, category, bookPrice, deliveryFee, coverImage } = req.body;
+        const {
+          title,
+          author,
+          description,
+          category,
+          bookPrice,
+          deliveryFee,
+          coverImage,
+        } = req.body;
 
-    const updatedBook = {
-      ...(title && { title }),
-      ...(author && { author }),
-      ...(description && { description }),
-      ...(category && { category: category.toLowerCase() }),
-      ...(bookPrice !== undefined && { price: parseFloat(bookPrice) || 0 }),
-      ...(deliveryFee !== undefined && { deliveryFee: parseFloat(deliveryFee) || 0 }),
-      ...(coverImage && { coverImage }),
-      updatedAt: new Date(),
-    };
+        const updatedBook = {
+          ...(title && { title }),
+          ...(author && { author }),
+          ...(description && { description }),
+          ...(category && { category: category.toLowerCase() }),
+          ...(bookPrice !== undefined && { price: parseFloat(bookPrice) || 0 }),
+          ...(deliveryFee !== undefined && {
+            deliveryFee: parseFloat(deliveryFee) || 0,
+          }),
+          ...(coverImage && { coverImage }),
+          updatedAt: new Date(),
+        };
 
-    const result = await booksCollection.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: updatedBook }
-    );
+        const result = await booksCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updatedBook },
+        );
 
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ success: false, message: 'Book not found.' });
-    }
+        if (result.matchedCount === 0) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'Book not found.' });
+        }
 
-    res.json({ success: true, message: 'Book updated successfully.' });
-  } catch (error) {
-    res.status(500).json({ success: false, message: 'Failed to update book.', error: error.message });
-  }
-});
+        res.json({ success: true, message: 'Book updated successfully.' });
+      } catch (error) {
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update book.',
+          error: error.message,
+        });
+      }
+    });
 
     // GET: Librarian er deliveries for payment collection
-app.get('/api/librarian/orders', async (req, res) => {
-  try {
-    const { librarianEmail } = req.query;
-    if (!librarianEmail) {
-      return res.status(400).json({ success: false, message: 'librarianEmail is required.' });
-    }
+    app.get('/api/librarian/orders', async (req, res) => {
+      try {
+        const { librarianEmail } = req.query;
+        if (!librarianEmail) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'librarianEmail is required.' });
+        }
 
-    // Payment collection এ librarianEmail নেই, তাই
-    // আগে এই librarian এর books গুলোর ID বের করো
-    const librarianBooks = await booksCollection
-      .find({ librarianEmail: librarianEmail.trim().toLowerCase() })
-      .project({ _id: 1, title: 1 })
-      .toArray();
+        // Payment collection এ librarianEmail নেই, তাই
+        // আগে এই librarian এর books গুলোর ID বের করো
+        const librarianBooks = await booksCollection
+          .find({ librarianEmail: librarianEmail.trim().toLowerCase() })
+          .project({ _id: 1, title: 1 })
+          .toArray();
 
-    const bookIds = librarianBooks.map(b => b._id.toString());
+        const bookIds = librarianBooks.map((b) => b._id.toString());
 
-    if (bookIds.length === 0) {
-      return res.json({ success: true, data: [], total: 0 });
-    }
+        if (bookIds.length === 0) {
+          return res.json({ success: true, data: [], total: 0 });
+        }
 
-    // এই book IDs দিয়ে payments খোঁজো
-    const orders = await paymentCollection
-      .find({ bookId: { $in: bookIds } })
-      .sort({ createdAt: -1 })
-      .toArray();
+        // এই book IDs দিয়ে payments খোঁজো
+        const orders = await paymentCollection
+          .find({ bookId: { $in: bookIds } })
+          .sort({ createdAt: -1 })
+          .toArray();
 
-    // orders এ extra info যোগ করো
-    const enrichedOrders = orders.map(order => ({
-      ...order,
-      clientName: order.customerEmail?.split('@')[0] || 'Customer', // email থেকে নাম
-      clientEmail: order.customerEmail,
-      bookTitle: order.bookTitle,
-      date: order.createdAt,
-      status: order.deliveryStatus || 'Pending', // আলাদা delivery status field
-    }));
+        // orders এ extra info যোগ করো
+        const enrichedOrders = orders.map((order) => ({
+          ...order,
+          clientName: order.customerEmail?.split('@')[0] || 'Customer', // email থেকে নাম
+          clientEmail: order.customerEmail,
+          bookTitle: order.bookTitle,
+          date: order.createdAt,
+          status: order.deliveryStatus || 'Pending', // আলাদা delivery status field
+        }));
 
-    res.json({ success: true, data: enrichedOrders, total: enrichedOrders.length });
-  } catch (error) {
-    console.error('Librarian Orders API Error:', error);
-    res.status(500).json({ success: false, message: 'Failed to fetch orders.', error: error.message });
-  }
-});
+        res.json({
+          success: true,
+          data: enrichedOrders,
+          total: enrichedOrders.length,
+        });
+      } catch (error) {
+        console.error('Librarian Orders API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch orders.',
+          error: error.message,
+        });
+      }
+    });
 
-// PATCH: Delivery status update
-app.patch('/api/orders/:orderId/status', async (req, res) => {
-  try {
-    const { orderId } = req.params;
-    const { status } = req.body;
+    // PATCH: Delivery status update
+    app.patch('/api/orders/:orderId/status', async (req, res) => {
+      try {
+        const { orderId } = req.params;
+        const { status } = req.body;
 
-    const validStatuses = ['Pending', 'Dispatched', 'Delivered'];
-    if (!validStatuses.includes(status)) {
-      return res.status(400).json({ success: false, message: 'Invalid status.' });
-    }
+        const validStatuses = ['Pending', 'Dispatched', 'Delivered'];
+        if (!validStatuses.includes(status)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid status.' });
+        }
 
-    if (!ObjectId.isValid(orderId)) {
-      return res.status(400).json({ success: false, message: 'Invalid order ID.' });
-    }
+        if (!ObjectId.isValid(orderId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid order ID.' });
+        }
 
-    const result = await paymentCollection.updateOne(
-      { _id: new ObjectId(orderId) },
-      { $set: { deliveryStatus: status, updatedAt: new Date() } }
-    );
+        const result = await paymentCollection.updateOne(
+          { _id: new ObjectId(orderId) },
+          { $set: { deliveryStatus: status, updatedAt: new Date() } },
+        );
 
-    if (result.modifiedCount === 0) {
-      return res.status(404).json({ success: false, message: 'Order not found.' });
-    }
+        if (result.modifiedCount === 0) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'Order not found.' });
+        }
 
-    res.json({ success: true, message: `Status updated to ${status}.` });
-  } catch (error) {
-    console.error('Update Order Status Error:', error);
-    res.status(500).json({ success: false, message: 'Failed to update status.', error: error.message });
-  }
-});
+        res.json({ success: true, message: `Status updated to ${status}.` });
+      } catch (error) {
+        console.error('Update Order Status Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update status.',
+          error: error.message,
+        });
+      }
+    });
+
+    //  API to fetch dashboard card metrics and chart data for Admin Overview
+    app.get('/api/admin/overview', async (req, res) => {
+      try {
+        // 1. Fetch total document counts for summary cards
+        const totalUsers = await usersCollection.countDocuments();
+        const totalBooks = await booksCollection.countDocuments();
+        const totalDeliveries = await paymentCollection.countDocuments({
+          paymentStatus: 'paid',
+        });
+
+        // 2. Calculate total revenue using MongoDB aggregation for performance optimization
+        const revenueAggregation = await paymentCollection
+          .aggregate([
+            { $match: { paymentStatus: 'paid' } },
+            { $group: { _id: null, total: { $sum: '$amountPaid' } } },
+          ])
+          .toArray();
+        const totalRevenue = revenueAggregation[0]?.total || 0;
+
+        // 3. Aggregate book quantities grouped by category for the Pie Chart
+        const categoryData = await booksCollection
+          .aggregate([
+            {
+              $group: {
+                _id: '$category',
+                count: { $sum: 1 },
+              },
+            },
+            {
+              $project: {
+                categoryName: '$_id',
+                count: 1,
+                _id: 0,
+              },
+            },
+          ])
+          .toArray();
+
+        // 4. Fixed 12-Month Trend Aggregation using String-to-Date Conversion
+        const rawMonthlyData = await paymentCollection
+          .aggregate([
+            {
+              $match: { paymentStatus: 'paid' },
+            },
+            {
+              $group: {
+                _id: {
+                  $month: {
+                    $cond: {
+                      if: { $eq: [{ $type: '$createdAt' }, 'string'] },
+                      then: { $dateFromString: { dateString: '$createdAt' } },
+                      else: '$createdAt', 
+                    },
+                  },
+                },
+                revenue: { $sum: '$amountPaid' },
+                deliveries: { $sum: 1 },
+              },
+            },
+            {
+              $sort: { _id: 1 },
+            },
+          ])
+          .toArray();
+
+        // Mapping month indices to string format matching the Recharts frontend array structure
+        const monthsLookup = [
+          'Jan',
+          'Feb',
+          'Mar',
+          'Apr',
+          'May',
+          'Jun',
+          'Jul',
+          'Aug',
+          'Sep',
+          'Oct',
+          'Nov',
+          'Dec',
+        ];
+
+        // Generate full calendar year baseline array ensuring months with zero activity still return telemetry
+        const monthlyRevenueFeed = monthsLookup.map((monthName, index) => {
+          const foundMonthData = rawMonthlyData.find(
+            (item) => item._id === index + 1,
+          );
+          return {
+            month: monthName,
+            revenue: foundMonthData ? foundMonthData.revenue : 0,
+            deliveries: foundMonthData ? foundMonthData.deliveries : 0,
+          };
+        });
+
+        // 5. Unified System Server Response
+        res.json({
+          success: true,
+          metrics: {
+            totalUsers,
+            totalBooks,
+            totalDeliveries,
+            totalRevenue,
+          },
+          categoryChart: categoryData,
+          monthlyRevenueFeed: monthlyRevenueFeed, // This feeds your full-year glowing area chart directly
+        });
+      } catch (error) {
+        console.error('Admin Overview API Error:', error);
+        res
+          .status(500)
+          .json({ success: false, message: 'Internal Server Error' });
+      }
+    });
+
+    // 🎯 API to fetch all books currently marked as "Pending Approval"
+    app.get('/api/admin/pending-books', async (req, res) => {
+      try {
+        const pendingBooks = await booksCollection
+          .find({ status: 'Pending Approval' })
+          .toArray();
+        res.json({ success: true, data: pendingBooks });
+      } catch (error) {
+        console.error('Fetch Pending Books Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // 🎯 API to approve and publish a book, making it publicly available
+    app.patch('/api/admin/books/:id/approve', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const result = await booksCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status: 'Published', approvedAt: new Date() } },
+        );
+
+        res.json({
+          success: true,
+          message:
+            'The book has been successfully approved and published platform-wide.',
+        });
+      } catch (error) {
+        console.error('Approve Book Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
 
 
 
@@ -439,16 +650,7 @@ app.patch('/api/orders/:orderId/status', async (req, res) => {
 
 
 
-
-
-
-
-
-
-
-
-
-
+    
 
     // payment related api for stripe checkout
     app.post('/api/payment-success', async (req, res) => {
@@ -475,7 +677,7 @@ app.patch('/api/orders/:orderId/status', async (req, res) => {
               stripeSessionId: sessionId,
               paymentStatus: 'paid',
               deliveryStatus: 'Pending',
-              createdAt: new Date(),
+              createdAt: new Date().toISOString(),
             };
 
             const result = await paymentCollection.insertOne(paymentRecord);
