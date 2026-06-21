@@ -400,40 +400,67 @@ async function run() {
     app.get('/api/librarian/orders', async (req, res) => {
       try {
         const { librarianEmail } = req.query;
+
         if (!librarianEmail) {
-          return res
-            .status(400)
-            .json({ success: false, message: 'librarianEmail is required.' });
+          return res.status(400).json({
+            success: false,
+            message: 'librarianEmail is required.',
+          });
         }
 
-        // Payment collection এ librarianEmail নেই, তাই
-        // আগে এই librarian এর books গুলোর ID বের করো
+        // 1. Get all books by this librarian
         const librarianBooks = await booksCollection
           .find({ librarianEmail: librarianEmail.trim().toLowerCase() })
-          .project({ _id: 1, title: 1 })
+          .project({ _id: 1, title: 1, price: 1, deliveryFee: 1 })
           .toArray();
 
+        console.log('📚 Librarian Books found:', librarianBooks.length);
+
+        // 2. Get book IDs
         const bookIds = librarianBooks.map((b) => b._id.toString());
 
         if (bookIds.length === 0) {
-          return res.json({ success: true, data: [], total: 0 });
+          return res.json({
+            success: true,
+            data: [],
+            total: 0,
+          });
         }
 
-        // এই book IDs দিয়ে payments খোঁজো
+        // 3. Get orders for these books
         const orders = await paymentCollection
           .find({ bookId: { $in: bookIds } })
           .sort({ createdAt: -1 })
           .toArray();
 
-        // orders এ extra info যোগ করো
-        const enrichedOrders = orders.map((order) => ({
-          ...order,
-          clientName: order.customerEmail?.split('@')[0] || 'Customer', // email থেকে নাম
-          clientEmail: order.customerEmail,
-          bookTitle: order.bookTitle,
-          date: order.createdAt,
-          status: order.deliveryStatus || 'Pending', // আলাদা delivery status field
-        }));
+        console.log('📦 Orders found:', orders.length);
+
+        // 4. ✅ Enrich orders with book details (ঠিক করা)
+        const enrichedOrders = orders.map((order) => {
+          // Find the book from librarianBooks array
+          const book = librarianBooks.find(
+            (b) => b._id.toString() === order.bookId,
+          );
+
+          return {
+            _id: order._id,
+            clientName: order.customerEmail?.split('@')[0] || 'Customer',
+            clientEmail: order.customerEmail || 'N/A',
+            bookTitle: order.bookTitle || book?.title || 'Unknown Book',
+            date: order.createdAt || new Date().toISOString(),
+            status: order.status || 'Pending',
+            amount: order.amountPaid || 0,
+            // ✅ Book details
+            price: book?.price || 0,
+            deliveryFee: book?.deliveryFee || 0,
+            bookId: order.bookId,
+            userId: order.userId,
+            paymentStatus: order.paymentStatus,
+            stripeSessionId: order.stripeSessionId,
+          };
+        });
+
+        console.log('✅ Enriched Orders:', enrichedOrders.length);
 
         res.json({
           success: true,
@@ -441,7 +468,7 @@ async function run() {
           total: enrichedOrders.length,
         });
       } catch (error) {
-        console.error('Librarian Orders API Error:', error);
+        console.error('❌ Librarian Orders API Error:', error);
         res.status(500).json({
           success: false,
           message: 'Failed to fetch orders.',
@@ -469,9 +496,10 @@ async function run() {
             .json({ success: false, message: 'Invalid order ID.' });
         }
 
+        // ✅ 'status' field update
         const result = await paymentCollection.updateOne(
           { _id: new ObjectId(orderId) },
-          { $set: { deliveryStatus: status, updatedAt: new Date() } },
+          { $set: { status: status, updatedAt: new Date() } },
         );
 
         if (result.modifiedCount === 0) {
@@ -480,12 +508,92 @@ async function run() {
             .json({ success: false, message: 'Order not found.' });
         }
 
+        // If status is Delivered, update book status
+        if (status === 'Delivered') {
+          const transaction = await paymentCollection.findOne({
+            _id: new ObjectId(orderId),
+          });
+          if (transaction?.bookId) {
+            try {
+              await booksCollection.updateOne(
+                { _id: new ObjectId(transaction.bookId) },
+                { $set: { status: 'Available' } },
+              );
+            } catch (e) {}
+          }
+        }
+
         res.json({ success: true, message: `Status updated to ${status}.` });
       } catch (error) {
         console.error('Update Order Status Error:', error);
         res.status(500).json({
           success: false,
           message: 'Failed to update status.',
+          error: error.message,
+        });
+      }
+    });
+
+    //  Librarian Overview API
+    app.get('/api/librarian/overview', async (req, res) => {
+      try {
+        const { librarianEmail } = req.query;
+
+        if (!librarianEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'librarianEmail is required.',
+          });
+        }
+
+        // 1. Total Books
+        const totalBooks = await booksCollection.countDocuments({
+          librarianEmail: librarianEmail.trim().toLowerCase(),
+        });
+
+        // 2. Get all books by this librarian
+        const books = await booksCollection
+          .find({ librarianEmail: librarianEmail.trim().toLowerCase() })
+          .project({ _id: 1 })
+          .toArray();
+
+        const bookIds = books.map((b) => b._id.toString());
+
+        // 3. Get all orders for these books
+        const orders = await paymentCollection
+          .find({ bookId: { $in: bookIds } })
+          .toArray();
+
+        // 4. Calculate Earnings (only delivered orders)
+        const deliveredOrders = orders.filter(
+          (order) => order.status === 'Delivered',
+        );
+        const totalEarnings = deliveredOrders.reduce((sum, order) => {
+          return sum + (order.amountPaid || 0);
+        }, 0);
+
+        // 5. Pending Orders
+        const pendingOrders = orders.filter(
+          (order) => order.status === 'Pending',
+        ).length;
+
+        // 6. Total Deliveries
+        const totalDeliveries = deliveredOrders.length;
+
+        res.json({
+          success: true,
+          data: {
+            totalBooks,
+            totalEarnings,
+            pendingOrders,
+            totalDeliveries,
+          },
+        });
+      } catch (error) {
+        console.error('Librarian Overview API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch overview data.',
           error: error.message,
         });
       }
@@ -741,12 +849,11 @@ async function run() {
           .sort({ createdAt: -1 })
           .toArray();
 
-        // Enrich transactions with book and user details
         const enrichedTransactions = await Promise.all(
           transactions.map(async (transaction) => {
-            // Get book details
             let bookTitle = transaction.bookTitle || 'Unknown Book';
-            let bookPrice = 0;
+            let librarianEmail = 'N/A';
+            let librarianName = 'N/A';
 
             if (transaction.bookId) {
               try {
@@ -755,26 +862,6 @@ async function run() {
                 });
                 if (book) {
                   bookTitle = book.title || bookTitle;
-                  bookPrice = book.price || 0;
-                }
-              } catch (e) {
-                // bookId might not be valid ObjectId
-              }
-            }
-
-            // Get user details
-            let userEmail = transaction.customerEmail || 'Unknown User';
-            let userName = userEmail.split('@')[0] || 'User';
-
-            // Get librarian details (from book)
-            let librarianEmail = 'N/A';
-            let librarianName = 'N/A';
-            if (transaction.bookId) {
-              try {
-                const book = await booksCollection.findOne({
-                  _id: new ObjectId(transaction.bookId),
-                });
-                if (book) {
                   librarianEmail = book.librarianEmail || 'N/A';
                   librarianName = book.librarianName || 'N/A';
                 }
@@ -784,20 +871,16 @@ async function run() {
             return {
               _id: transaction._id,
               transactionId: `TXN-${transaction._id.toString().slice(-8)}`,
-              userEmail,
-              userName,
+              userEmail: transaction.customerEmail || 'Unknown User',
+              userName: transaction.customerEmail?.split('@')[0] || 'User',
               librarianEmail,
               librarianName,
               bookId: transaction.bookId,
               bookTitle,
               amountPaid: transaction.amountPaid || 0,
-              deliveryFee: transaction.deliveryFee || 0,
-              // ✅ Use 'status' field from payment collection
-              status:
-                transaction.status || transaction.deliveryStatus || 'Pending',
+              status: transaction.status || 'Pending',
               paymentStatus: transaction.paymentStatus || 'paid',
               date: transaction.createdAt || new Date().toISOString(),
-              stripeSessionId: transaction.stripeSessionId,
             };
           }),
         );
@@ -865,7 +948,6 @@ async function run() {
             bookTitle,
             librarianEmail,
             librarianName,
-            // ✅ Use 'status' field
             status:
               transaction.status || transaction.deliveryStatus || 'Pending',
           },
@@ -902,20 +984,13 @@ async function run() {
         if (!validStatuses.includes(status)) {
           return res.status(400).json({
             success: false,
-            message:
-              'Invalid status. Must be one of: ' + validStatuses.join(', '),
+            message: 'Invalid status.',
           });
         }
 
-        // ✅ Use 'status' field (not 'deliveryStatus')
         const result = await paymentCollection.updateOne(
           { _id: new ObjectId(id) },
-          {
-            $set: {
-              status: status, // ✅ 'status' field use করো
-              updatedAt: new Date(),
-            },
-          },
+          { $set: { status: status, updatedAt: new Date() } },
         );
 
         if (result.modifiedCount === 0) {
@@ -925,24 +1000,15 @@ async function run() {
           });
         }
 
-        // If status is Delivered, update book status to Available
         if (status === 'Delivered') {
           const transaction = await paymentCollection.findOne({
             _id: new ObjectId(id),
           });
-
-          if (transaction?.bookId) {
-            try {
-              // ✅ Check if bookId is valid ObjectId
-              if (ObjectId.isValid(transaction.bookId)) {
-                await booksCollection.updateOne(
-                  { _id: new ObjectId(transaction.bookId) },
-                  { $set: { status: 'Available' } },
-                );
-              }
-            } catch (e) {
-              console.error('Error updating book status:', e);
-            }
+          if (transaction?.bookId && ObjectId.isValid(transaction.bookId)) {
+            await booksCollection.updateOne(
+              { _id: new ObjectId(transaction.bookId) },
+              { $set: { status: 'Available' } },
+            );
           }
         }
 
@@ -959,15 +1025,6 @@ async function run() {
         });
       }
     });
-
-
-
-
-
-
-
-
-
 
     // stripe payment related api
     app.post('/api/payment-success', async (req, res) => {
@@ -993,7 +1050,7 @@ async function run() {
               amountPaid: session.amount_total / 100,
               stripeSessionId: sessionId,
               paymentStatus: 'paid',
-              status: 'Pending', 
+              status: 'Pending',
               createdAt: new Date().toISOString(),
             };
 
@@ -1002,7 +1059,7 @@ async function run() {
             if (session.metadata?.bookId) {
               await booksCollection.updateOne(
                 { _id: new ObjectId(session.metadata.bookId) },
-                { $set: { status: 'Checked Out' } }, 
+                { $set: { status: 'Checked Out' } },
               );
             }
             return res
