@@ -658,6 +658,98 @@ async function run() {
       }
     });
 
+    // Admin dashboard api for manage users page
+    // 1. GET: for all users
+    app.get('/api/admin/users', async (req, res) => {
+      try {
+        const users = await usersCollection.find().toArray();
+        res.json({ success: true, data: users });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // 2. PATCH: user role change
+    app.patch('/api/admin/users/:id/role', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { role } = req.body;
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { role: role } },
+        );
+        res.json({ success: true, message: 'User role updated successfully' });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // 3. DELETE: user delete
+    app.delete('/api/admin/users/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        await usersCollection.deleteOne({ _id: new ObjectId(id) });
+        res.json({ success: true, message: 'User deleted successfully' });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // 1. Get All Books
+    app.get('/api/admin/books', async (req, res) => {
+      try {
+        const books = await booksCollection.find().toArray();
+        res.json({ success: true, data: books });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // 2. Toggle Book Status (Published <-> Unpublished)
+    app.patch('/api/admin/books/:id/toggle', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body;
+        await booksCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { status } },
+        );
+        res.json({ success: true });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+    // 3. Delete Book
+    app.delete('/api/admin/books/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        await booksCollection.deleteOne({ _id: new ObjectId(id) });
+        res.json({ success: true });
+      } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
     // payment related api for stripe checkout
     app.post('/api/payment-success', async (req, res) => {
       try {
