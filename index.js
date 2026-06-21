@@ -59,7 +59,9 @@ async function run() {
           limit = 12,
         } = req.query;
 
-        const filter = {};
+        const filter = {
+          status: 'Published',
+        };
 
         // Search
         if (search) {
@@ -84,9 +86,9 @@ async function run() {
 
         // ✅ Availability — DB values: "available" | "checked_out"
         if (availability === 'available') {
-          filter.status = 'available';
+          filter.status = 'Published';
         } else if (availability === 'checked_out') {
-          filter.status = 'checked_out';
+          filter.status = 'Pending Delivery';
         }
 
         // ✅ Sort — "price" field support added, removed wrong "deliveryFee" sort
@@ -540,7 +542,7 @@ async function run() {
                     $cond: {
                       if: { $eq: [{ $type: '$createdAt' }, 'string'] },
                       then: { $dateFromString: { dateString: '$createdAt' } },
-                      else: '$createdAt', 
+                      else: '$createdAt',
                     },
                   },
                 },
@@ -635,22 +637,26 @@ async function run() {
       }
     });
 
+    // 🎯 API to permanently delete a book by admin
+    app.delete('/api/admin/books/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const result = await booksCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
 
+        if (result.deletedCount === 0) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'Book not found.' });
+        }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
+        res.json({ success: true, message: 'Book permanently deleted.' });
+      } catch (error) {
+        console.error('Delete Book Error:', error);
+        res.status(500).json({ success: false, error: error.message });
+      }
+    });
 
     // payment related api for stripe checkout
     app.post('/api/payment-success', async (req, res) => {
