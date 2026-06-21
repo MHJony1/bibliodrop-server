@@ -731,6 +731,234 @@ async function run() {
       }
     });
 
+    // 📊 TRANSACTIONS API (Admin)
+
+    // 1. GET: All Transactions for Admin
+    app.get('/api/admin/transactions', async (req, res) => {
+      try {
+        const transactions = await paymentCollection
+          .find()
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // Enrich transactions with book and user details
+        const enrichedTransactions = await Promise.all(
+          transactions.map(async (transaction) => {
+            // Get book details
+            let bookTitle = transaction.bookTitle || 'Unknown Book';
+            let bookPrice = 0;
+
+            if (transaction.bookId) {
+              try {
+                const book = await booksCollection.findOne({
+                  _id: new ObjectId(transaction.bookId),
+                });
+                if (book) {
+                  bookTitle = book.title || bookTitle;
+                  bookPrice = book.price || 0;
+                }
+              } catch (e) {
+                // bookId might not be valid ObjectId
+              }
+            }
+
+            // Get user details
+            let userEmail = transaction.customerEmail || 'Unknown User';
+            let userName = userEmail.split('@')[0] || 'User';
+
+            // Get librarian details (from book)
+            let librarianEmail = 'N/A';
+            let librarianName = 'N/A';
+            if (transaction.bookId) {
+              try {
+                const book = await booksCollection.findOne({
+                  _id: new ObjectId(transaction.bookId),
+                });
+                if (book) {
+                  librarianEmail = book.librarianEmail || 'N/A';
+                  librarianName = book.librarianName || 'N/A';
+                }
+              } catch (e) {}
+            }
+
+            return {
+              _id: transaction._id,
+              transactionId: `TXN-${transaction._id.toString().slice(-8)}`,
+              userEmail,
+              userName,
+              librarianEmail,
+              librarianName,
+              bookId: transaction.bookId,
+              bookTitle,
+              amountPaid: transaction.amountPaid || 0,
+              deliveryFee: transaction.deliveryFee || 0,
+              // ✅ Use 'status' field from payment collection
+              status:
+                transaction.status || transaction.deliveryStatus || 'Pending',
+              paymentStatus: transaction.paymentStatus || 'paid',
+              date: transaction.createdAt || new Date().toISOString(),
+              stripeSessionId: transaction.stripeSessionId,
+            };
+          }),
+        );
+
+        res.json({
+          success: true,
+          data: enrichedTransactions,
+          total: enrichedTransactions.length,
+        });
+      } catch (error) {
+        console.error('Transactions API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch transactions',
+          error: error.message,
+        });
+      }
+    });
+
+    // 2. GET: Single Transaction by ID
+    app.get('/api/admin/transactions/:id', async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid transaction ID',
+          });
+        }
+
+        const transaction = await paymentCollection.findOne({
+          _id: new ObjectId(id),
+        });
+
+        if (!transaction) {
+          return res.status(404).json({
+            success: false,
+            message: 'Transaction not found',
+          });
+        }
+
+        // Get book details
+        let bookTitle = transaction.bookTitle || 'Unknown Book';
+        let librarianEmail = 'N/A';
+        let librarianName = 'N/A';
+
+        if (transaction.bookId) {
+          try {
+            const book = await booksCollection.findOne({
+              _id: new ObjectId(transaction.bookId),
+            });
+            if (book) {
+              bookTitle = book.title || bookTitle;
+              librarianEmail = book.librarianEmail || 'N/A';
+              librarianName = book.librarianName || 'N/A';
+            }
+          } catch (e) {}
+        }
+
+        res.json({
+          success: true,
+          data: {
+            ...transaction,
+            bookTitle,
+            librarianEmail,
+            librarianName,
+            // ✅ Use 'status' field
+            status:
+              transaction.status || transaction.deliveryStatus || 'Pending',
+          },
+        });
+      } catch (error) {
+        console.error('Transaction API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch transaction',
+          error: error.message,
+        });
+      }
+    });
+
+    // 3. PATCH: Update Transaction Delivery Status
+    app.patch('/api/admin/transactions/:id/status', async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid transaction ID',
+          });
+        }
+
+        const validStatuses = [
+          'Pending',
+          'Dispatched',
+          'Delivered',
+          'Cancelled',
+        ];
+        if (!validStatuses.includes(status)) {
+          return res.status(400).json({
+            success: false,
+            message:
+              'Invalid status. Must be one of: ' + validStatuses.join(', '),
+          });
+        }
+
+        // ✅ Use 'status' field (not 'deliveryStatus')
+        const result = await paymentCollection.updateOne(
+          { _id: new ObjectId(id) },
+          {
+            $set: {
+              status: status, // ✅ 'status' field use করো
+              updatedAt: new Date(),
+            },
+          },
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'Transaction not found',
+          });
+        }
+
+        // If status is Delivered, update book status to Available
+        if (status === 'Delivered') {
+          const transaction = await paymentCollection.findOne({
+            _id: new ObjectId(id),
+          });
+
+          if (transaction?.bookId) {
+            try {
+              // ✅ Check if bookId is valid ObjectId
+              if (ObjectId.isValid(transaction.bookId)) {
+                await booksCollection.updateOne(
+                  { _id: new ObjectId(transaction.bookId) },
+                  { $set: { status: 'Available' } },
+                );
+              }
+            } catch (e) {
+              console.error('Error updating book status:', e);
+            }
+          }
+        }
+
+        res.json({
+          success: true,
+          message: `Transaction status updated to ${status}`,
+        });
+      } catch (error) {
+        console.error('Update Transaction Status Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update transaction status',
+          error: error.message,
+        });
+      }
+    });
 
 
 
@@ -741,16 +969,7 @@ async function run() {
 
 
 
-
-
-
-
-
-
-
-    
-
-    // payment related api for stripe checkout
+    // stripe payment related api
     app.post('/api/payment-success', async (req, res) => {
       try {
         const { sessionId } = req.body;
@@ -774,7 +993,7 @@ async function run() {
               amountPaid: session.amount_total / 100,
               stripeSessionId: sessionId,
               paymentStatus: 'paid',
-              deliveryStatus: 'Pending',
+              status: 'Pending', 
               createdAt: new Date().toISOString(),
             };
 
@@ -783,7 +1002,7 @@ async function run() {
             if (session.metadata?.bookId) {
               await booksCollection.updateOne(
                 { _id: new ObjectId(session.metadata.bookId) },
-                { $set: { status: 'Pending Delivery' } },
+                { $set: { status: 'Checked Out' } }, 
               );
             }
             return res
