@@ -96,7 +96,7 @@ async function run() {
           sortObj.title = order === 'desc' ? -1 : 1;
         } else {
           sortObj[sort === 'createdAt' ? 'dateAdded' : sort] =
-            order === 'desc' ? -1 : 1;
+            order === 'desc' ? 1 : 1;
         }
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -165,6 +165,291 @@ async function run() {
       }
     });
 
+    // Librarian Dashboard Related api
+
+    // GET: Librarian Books API
+    app.get('/api/librarian/books', async (req, res) => {
+      try {
+        const { librarianEmail } = req.query;
+
+        // Validation
+        if (!librarianEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'librarianEmail query parameter is required.',
+          });
+        }
+
+        const filter = {
+          librarianEmail: librarianEmail.trim().toLowerCase(),
+        };
+
+        const books = await booksCollection
+          .find(filter)
+          .sort({ dateAdded: -1 })
+          .toArray();
+
+        res.json({
+          success: true,
+          data: books,
+          total: books.length,
+        });
+      } catch (error) {
+        console.error('Librarian Books API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch librarian books.',
+          error: error.message,
+        });
+      }
+    });
+
+    // post api for add book data in database
+    app.post('/api/books', async (req, res) => {
+      try {
+        // Destructure incoming request body from frontend
+        const {
+          title,
+          author,
+          description,
+          category,
+          bookPrice,
+          deliveryFee,
+          coverImage,
+          status,
+          librarianEmail,
+        } = req.body;
+
+        // 1. Server-side validation for required fields
+        if (!title || !author || !category || !coverImage) {
+          return res.status(400).json({
+            success: false,
+            message:
+              'Missing required fields: title, author, category, and cover image are mandatory.',
+          });
+        }
+
+        // 2. Format the book object to match database structure exactly
+        const newBook = {
+          title,
+          author,
+          description,
+          category: category ? category.toLowerCase() : '',
+          price: parseFloat(bookPrice) || 0,
+          deliveryFee: parseFloat(deliveryFee) || 0,
+          coverImage,
+          status: status || 'Pending Approval',
+          librarianEmail: librarianEmail ? librarianEmail.trim().toLowerCase() : null, 
+          dateAdded: new Date(),
+        };
+
+        // 3. Insert the document using Native MongoDB Driver
+        const result = await booksCollection.insertOne(newBook);
+
+        // 4. Send success response back to frontend
+        res.status(201).json({
+          success: true,
+          message: 'Book submitted successfully and is pending approval!',
+          insertedId: result.insertedId,
+        });
+      } catch (error) {
+        console.error('Add Book API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Internal Server Error. Could not save book data.',
+          error: error.message,
+        });
+      }
+    });
+
+    // book update, delete actions api
+    // DELETE: Book delete
+app.delete('/api/books/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid book ID.' });
+    }
+
+    const result = await booksCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Book not found.' });
+    }
+
+    res.json({ success: true, message: 'Book deleted successfully.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to delete book.', error: error.message });
+  }
+});
+
+// PATCH: Book status toggle (Published <-> Unpublished)
+app.patch('/api/books/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid book ID.' });
+    }
+
+    const validStatuses = ['Published', 'Unpublished'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status.' });
+    }
+
+    const result = await booksCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Book not found.' });
+    }
+
+    res.json({ success: true, message: `Book ${status} successfully.` });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to update status.', error: error.message });
+  }
+});
+
+// PATCH: Book edit/update
+app.patch('/api/books/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid book ID.' });
+    }
+
+    const { title, author, description, category, bookPrice, deliveryFee, coverImage } = req.body;
+
+    const updatedBook = {
+      ...(title && { title }),
+      ...(author && { author }),
+      ...(description && { description }),
+      ...(category && { category: category.toLowerCase() }),
+      ...(bookPrice !== undefined && { price: parseFloat(bookPrice) || 0 }),
+      ...(deliveryFee !== undefined && { deliveryFee: parseFloat(deliveryFee) || 0 }),
+      ...(coverImage && { coverImage }),
+      updatedAt: new Date(),
+    };
+
+    const result = await booksCollection.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updatedBook }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Book not found.' });
+    }
+
+    res.json({ success: true, message: 'Book updated successfully.' });
+  } catch (error) {
+    res.status(500).json({ success: false, message: 'Failed to update book.', error: error.message });
+  }
+});
+
+    // GET: Librarian er deliveries for payment collection
+app.get('/api/librarian/orders', async (req, res) => {
+  try {
+    const { librarianEmail } = req.query;
+    if (!librarianEmail) {
+      return res.status(400).json({ success: false, message: 'librarianEmail is required.' });
+    }
+
+    // Payment collection এ librarianEmail নেই, তাই
+    // আগে এই librarian এর books গুলোর ID বের করো
+    const librarianBooks = await booksCollection
+      .find({ librarianEmail: librarianEmail.trim().toLowerCase() })
+      .project({ _id: 1, title: 1 })
+      .toArray();
+
+    const bookIds = librarianBooks.map(b => b._id.toString());
+
+    if (bookIds.length === 0) {
+      return res.json({ success: true, data: [], total: 0 });
+    }
+
+    // এই book IDs দিয়ে payments খোঁজো
+    const orders = await paymentCollection
+      .find({ bookId: { $in: bookIds } })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // orders এ extra info যোগ করো
+    const enrichedOrders = orders.map(order => ({
+      ...order,
+      clientName: order.customerEmail?.split('@')[0] || 'Customer', // email থেকে নাম
+      clientEmail: order.customerEmail,
+      bookTitle: order.bookTitle,
+      date: order.createdAt,
+      status: order.deliveryStatus || 'Pending', // আলাদা delivery status field
+    }));
+
+    res.json({ success: true, data: enrichedOrders, total: enrichedOrders.length });
+  } catch (error) {
+    console.error('Librarian Orders API Error:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch orders.', error: error.message });
+  }
+});
+
+// PATCH: Delivery status update
+app.patch('/api/orders/:orderId/status', async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const { status } = req.body;
+
+    const validStatuses = ['Pending', 'Dispatched', 'Delivered'];
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, message: 'Invalid status.' });
+    }
+
+    if (!ObjectId.isValid(orderId)) {
+      return res.status(400).json({ success: false, message: 'Invalid order ID.' });
+    }
+
+    const result = await paymentCollection.updateOne(
+      { _id: new ObjectId(orderId) },
+      { $set: { deliveryStatus: status, updatedAt: new Date() } }
+    );
+
+    if (result.modifiedCount === 0) {
+      return res.status(404).json({ success: false, message: 'Order not found.' });
+    }
+
+    res.json({ success: true, message: `Status updated to ${status}.` });
+  } catch (error) {
+    console.error('Update Order Status Error:', error);
+    res.status(500).json({ success: false, message: 'Failed to update status.', error: error.message });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     // payment related api for stripe checkout
     app.post('/api/payment-success', async (req, res) => {
       try {
@@ -189,6 +474,7 @@ async function run() {
               amountPaid: session.amount_total / 100,
               stripeSessionId: sessionId,
               paymentStatus: 'paid',
+              deliveryStatus: 'Pending',
               createdAt: new Date(),
             };
 
@@ -218,21 +504,6 @@ async function run() {
         res.status(500).json({ error: 'Internal Server Error' });
       }
     });
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // Send a ping to confirm a successful connection
     await client.db('admin').command({ ping: 1 });
