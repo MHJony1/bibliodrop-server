@@ -60,7 +60,9 @@ async function run() {
         } = req.query;
 
         const filter = {
-          status: 'Published',
+          status: {
+            $in: ['Published', 'Available', 'Checked Out', 'Pending Delivery'],
+          },
         };
 
         // Search
@@ -72,34 +74,35 @@ async function run() {
           ];
         }
 
-        // ✅ Category — case-insensitive regex (DB: "romance", "sci-fi", "academic"...)
+        // Category
         if (category && category !== 'all categories') {
           filter.category = { $regex: new RegExp(`^${category}$`, 'i') };
         }
 
-        // ✅ Price range — DB field is "price" (not deliveryFee)
+        // Price range
         if (minPrice || maxPrice) {
           filter.price = {};
           if (minPrice) filter.price.$gte = parseFloat(minPrice);
           if (maxPrice) filter.price.$lte = parseFloat(maxPrice);
         }
 
-        // ✅ Availability — DB values: "available" | "checked_out"
+        // ✅ Availability filter
         if (availability === 'available') {
-          filter.status = 'Published';
+          filter.status = { $in: ['Published', 'Available'] };
         } else if (availability === 'checked_out') {
-          filter.status = 'Pending Delivery';
+          filter.status = {
+            $in: ['Checked Out', 'Pending Delivery', 'Pending'],
+          };
         }
 
-        // ✅ Sort — "price" field support added, removed wrong "deliveryFee" sort
+        // Sort
         const sortObj = {};
         if (sort === 'price') {
           sortObj.price = order === 'desc' ? -1 : 1;
         } else if (sort === 'title') {
           sortObj.title = order === 'desc' ? -1 : 1;
         } else {
-          sortObj[sort === 'createdAt' ? 'dateAdded' : sort] =
-            order === 'desc' ? -1 : 1;
+          sortObj.dateAdded = order === 'desc' ? -1 : 1;
         }
 
         const skip = (parseInt(page) - 1) * parseInt(limit);
@@ -114,6 +117,8 @@ async function run() {
             .toArray(),
           booksCollection.countDocuments(filter),
         ]);
+
+        console.log(`📚 Found ${books.length} books (${total} total)`);
 
         res.json({
           success: true,
@@ -517,7 +522,7 @@ async function run() {
             try {
               await booksCollection.updateOne(
                 { _id: new ObjectId(transaction.bookId) },
-                { $set: { status: 'Available' } },
+                { $set: { status: 'Checked Out' } },
               );
             } catch (e) {}
           }
@@ -1007,7 +1012,7 @@ async function run() {
           if (transaction?.bookId && ObjectId.isValid(transaction.bookId)) {
             await booksCollection.updateOne(
               { _id: new ObjectId(transaction.bookId) },
-              { $set: { status: 'Available' } },
+              { $set: { status: 'Checked Out' } },
             );
           }
         }
@@ -1116,10 +1121,15 @@ async function run() {
       }
     });
 
-    // 2. GET: User Delivery History
+   
+
+    // 2. 👤 USER DELIVERY HISTORY API
     app.get('/api/user/deliveries', async (req, res) => {
       try {
         const { userEmail } = req.query;
+
+        console.log('🔍 ===== USER DELIVERY API CALLED =====');
+        console.log('📧 User Email:', userEmail);
 
         if (!userEmail) {
           return res.status(400).json({
@@ -1128,42 +1138,67 @@ async function run() {
           });
         }
 
-        const deliveries = await paymentCollection
+        // ✅ Find orders
+        const orders = await paymentCollection
           .find({ customerEmail: userEmail.trim().toLowerCase() })
           .sort({ createdAt: -1 })
           .toArray();
 
-        // Enrich with book details
-        const enrichedDeliveries = await Promise.all(
-          deliveries.map(async (delivery) => {
-            let bookTitle = delivery.bookTitle || 'Unknown Book';
-            let coverImage = null;
-            let author = 'Unknown';
+        console.log('📦 Orders Found:', orders.length);
 
-            if (delivery.bookId) {
-              try {
-                const book = await booksCollection.findOne({
-                  _id: new ObjectId(delivery.bookId),
-                });
-                if (book) {
-                  bookTitle = book.title || bookTitle;
-                  coverImage = book.coverImage || null;
-                  author = book.author || author;
-                }
-              } catch (e) {}
-            }
+        if (orders.length === 0) {
+          return res.json({
+            success: true,
+            data: [],
+            total: 0,
+          });
+        }
 
-            return {
-              _id: delivery._id,
-              bookTitle,
-              coverImage,
-              author,
-              amount: delivery.amountPaid || 0,
-              status: delivery.status || 'Pending',
-              date: delivery.createdAt || new Date().toISOString(),
-              bookId: delivery.bookId,
-            };
-          }),
+        // ✅ Log first order
+        console.log(
+          '📋 Sample Order:',
+          JSON.stringify(
+            {
+              _id: orders[0]._id,
+              bookTitle: orders[0].bookTitle,
+              amountPaid: orders[0].amountPaid,
+              status: orders[0].status,
+              bookId: orders[0].bookId,
+            },
+            null,
+            2,
+          ),
+        );
+
+        // ✅ Enrich orders
+        const enrichedDeliveries = orders.map((order) => ({
+          _id: order._id,
+          transactionId: `TXN-${order._id.toString().slice(-8).toUpperCase()}`,
+          bookTitle: order.bookTitle || 'Unknown Book',
+          coverImage: null,
+          author: 'Unknown',
+          totalFee: order.amountPaid || 0,
+          amountPaid: order.amountPaid || 0,
+          status: order.status || 'Pending',
+          date: order.createdAt || new Date().toISOString(),
+          bookId: order.bookId || null,
+          customerEmail: order.customerEmail,
+          paymentStatus: order.paymentStatus,
+        }));
+
+        console.log('✅ Enriched Count:', enrichedDeliveries.length);
+        console.log(
+          '✅ Sample Enriched:',
+          JSON.stringify(
+            {
+              bookTitle: enrichedDeliveries[0]?.bookTitle,
+              totalFee: enrichedDeliveries[0]?.totalFee,
+              amountPaid: enrichedDeliveries[0]?.amountPaid,
+              status: enrichedDeliveries[0]?.status,
+            },
+            null,
+            2,
+          ),
         );
 
         res.json({
@@ -1172,101 +1207,117 @@ async function run() {
           total: enrichedDeliveries.length,
         });
       } catch (error) {
-        console.error('User Deliveries API Error:', error);
+        console.error('❌ API Error:', error);
         res.status(500).json({
           success: false,
-          message: 'Failed to fetch deliveries',
+          message: 'Failed to fetch delivery history',
           error: error.message,
         });
       }
     });
 
-    // 👤 USER DELIVERY HISTORY API
-   app.get('/api/user/deliveries', async (req, res) => {
-  try {
-    const { userEmail } = req.query;
-    
-    console.log('🔍 ===== USER DELIVERY API CALLED =====');
-    console.log('📧 User Email:', userEmail);
+    //user order cancel and delete actions api
+    app.delete('/api/user/orders/:orderId', async (req, res) => {
+      try {
+        const { orderId } = req.params;
 
-    if (!userEmail) {
-      return res.status(400).json({
-        success: false,
-        message: 'userEmail is required.'
-      });
-    }
+        if (!ObjectId.isValid(orderId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid order ID.' });
+        }
 
-    // ✅ Find orders
-    const orders = await paymentCollection
-      .find({ customerEmail: userEmail.trim().toLowerCase() })
-      .sort({ createdAt: -1 })
-      .toArray();
+        // Order
+        const order = await paymentCollection.findOne({
+          _id: new ObjectId(orderId),
+        });
 
-    console.log('📦 Orders Found:', orders.length);
+        if (!order) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'Order not found.' });
+        }
 
-    if (orders.length === 0) {
-      return res.json({
-        success: true,
-        data: [],
-        total: 0
-      });
-    }
+        // Order delete
+        await paymentCollection.deleteOne({ _id: new ObjectId(orderId) });
 
-    // ✅ Log first order
-    console.log('📋 Sample Order:', JSON.stringify({
-      _id: orders[0]._id,
-      bookTitle: orders[0].bookTitle,
-      amountPaid: orders[0].amountPaid,
-      status: orders[0].status,
-      bookId: orders[0].bookId,
-    }, null, 2));
+        // Book status
+        if (order.bookId && ObjectId.isValid(order.bookId)) {
+          await booksCollection.updateOne(
+            { _id: new ObjectId(order.bookId) },
+            { $set: { status: 'Published' } },
+          );
+        }
 
-    // ✅ Enrich orders
-    const enrichedDeliveries = orders.map(order => ({
-      _id: order._id,
-      transactionId: `TXN-${order._id.toString().slice(-8).toUpperCase()}`,
-      bookTitle: order.bookTitle || 'Unknown Book',
-      coverImage: null,
-      author: 'Unknown',
-      totalFee: order.amountPaid || 0,
-      amountPaid: order.amountPaid || 0,
-      status: order.status || 'Pending',
-      date: order.createdAt || new Date().toISOString(),
-      bookId: order.bookId || null,
-      customerEmail: order.customerEmail,
-      paymentStatus: order.paymentStatus,
-    }));
-
-    console.log('✅ Enriched Count:', enrichedDeliveries.length);
-    console.log('✅ Sample Enriched:', JSON.stringify({
-      bookTitle: enrichedDeliveries[0]?.bookTitle,
-      totalFee: enrichedDeliveries[0]?.totalFee,
-      amountPaid: enrichedDeliveries[0]?.amountPaid,
-      status: enrichedDeliveries[0]?.status,
-    }, null, 2));
-
-    res.json({
-      success: true,
-      data: enrichedDeliveries,
-      total: enrichedDeliveries.length
+        res.json({ success: true, message: 'Order deleted successfully.' });
+      } catch (error) {
+        console.error('Delete Order Error:', error);
+        res
+          .status(500)
+          .json({
+            success: false,
+            message: 'Failed to delete order.',
+            error: error.message,
+          });
+      }
     });
 
-  } catch (error) {
-    console.error('❌ API Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to fetch delivery history',
-      error: error.message
+    // PATCH: User order cancel
+    app.patch('/api/user/orders/:orderId/cancel', async (req, res) => {
+      try {
+        const { orderId } = req.params;
+
+        if (!ObjectId.isValid(orderId)) {
+          return res
+            .status(400)
+            .json({ success: false, message: 'Invalid order ID.' });
+        }
+
+        // Order
+        const order = await paymentCollection.findOne({
+          _id: new ObjectId(orderId),
+        });
+
+        if (!order) {
+          return res
+            .status(404)
+            .json({ success: false, message: 'Order not found.' });
+        }
+
+        //  Pending order cancel
+        if (order.status !== 'Pending') {
+          return res.status(400).json({
+            success: false,
+            message: 'Only pending orders can be cancelled.',
+          });
+        }
+
+        // Status Cancelled
+        await paymentCollection.updateOne(
+          { _id: new ObjectId(orderId) },
+          { $set: { status: 'Cancelled', updatedAt: new Date() } },
+        );
+
+        // Book status published
+        if (order.bookId && ObjectId.isValid(order.bookId)) {
+          await booksCollection.updateOne(
+            { _id: new ObjectId(order.bookId) },
+            { $set: { status: 'Published' } },
+          );
+        }
+
+        res.json({ success: true, message: 'Order cancelled successfully.' });
+      } catch (error) {
+        console.error('Cancel Order Error:', error);
+        res
+          .status(500)
+          .json({
+            success: false,
+            message: 'Failed to cancel order.',
+            error: error.message,
+          });
+      }
     });
-  }
-});
-
-
-
-
-
-
-
 
     // stripe payment related api
     app.post('/api/payment-success', async (req, res) => {
