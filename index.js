@@ -43,6 +43,8 @@ async function run() {
     const booksCollection = db.collection('books');
     const paymentCollection = db.collection('payments');
     const usersCollection = db.collection('user');
+    const reviewsCollection = db.collection('reviews');
+    const wishlistCollection = db.collection('wishlist');
 
     // books related api for all books with search, category, price, availability
     app.get('/api/books', async (req, res) => {
@@ -153,16 +155,34 @@ async function run() {
       }
 
       try {
+        // Get book details
         const book = await booksCollection.findOne({ _id: new ObjectId(id) });
 
-        if (book) {
-          res.json({ success: true, data: book });
-        } else {
-          res.status(404).json({
+        if (!book) {
+          return res.status(404).json({
             success: false,
             message: 'Book not found',
           });
         }
+
+        // Get all delivered users for this book
+        const deliveredOrders = await paymentCollection
+          .find({
+            bookId: id,
+            status: 'Delivered',
+          })
+          .toArray();
+
+        const deliveredBuyers = deliveredOrders.map((o) => o.customerEmail);
+
+        //  Return book with deliveredBuyers
+        res.json({
+          success: true,
+          data: {
+            ...book,
+            deliveredBuyers: deliveredBuyers || [],
+          },
+        });
       } catch (error) {
         console.error('❌ Book API Error:', error);
         res.status(500).json({
@@ -1121,8 +1141,6 @@ async function run() {
       }
     });
 
-   
-
     // 2. 👤 USER DELIVERY HISTORY API
     app.get('/api/user/deliveries', async (req, res) => {
       try {
@@ -1216,6 +1234,84 @@ async function run() {
       }
     });
 
+    // GET /api/user/reading-list
+    app.get('/api/user/reading-list', async (req, res) => {
+      try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail is required.',
+          });
+        }
+
+        // ✅ Get all delivered orders by this user
+        const deliveredOrders = await paymentCollection
+          .find({
+            customerEmail: userEmail.trim().toLowerCase(),
+            status: 'Delivered',
+          })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // ✅ Enrich with book details
+        const readingList = await Promise.all(
+          deliveredOrders.map(async (order) => {
+            let bookTitle = order.bookTitle || 'Unknown Book';
+            let coverImage = null;
+            let author = 'Unknown';
+            let bookPrice = 0;
+            let category = 'Uncategorized';
+            let bookId = order.bookId;
+            let dateRead = order.updatedAt || order.createdAt;
+
+            if (order.bookId) {
+              try {
+                const book = await booksCollection.findOne({
+                  _id: new ObjectId(order.bookId),
+                });
+                if (book) {
+                  bookTitle = book.title || bookTitle;
+                  coverImage = book.coverImage || null;
+                  author = book.author || author;
+                  bookPrice = book.price || 0;
+                  category = book.category || category;
+                  bookId = order.bookId;
+                }
+              } catch (e) {}
+            }
+
+            return {
+              _id: order._id,
+              bookId,
+              bookTitle,
+              coverImage,
+              author,
+              bookPrice,
+              category,
+              dateRead: dateRead || new Date().toISOString(),
+              orderDate: order.createdAt,
+              amountPaid: order.amountPaid || 0,
+            };
+          }),
+        );
+
+        res.json({
+          success: true,
+          data: readingList,
+          total: readingList.length,
+        });
+      } catch (error) {
+        console.error('Reading List API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch reading list',
+          error: error.message,
+        });
+      }
+    });
+
     //user order cancel and delete actions api
     app.delete('/api/user/orders/:orderId', async (req, res) => {
       try {
@@ -1252,13 +1348,11 @@ async function run() {
         res.json({ success: true, message: 'Order deleted successfully.' });
       } catch (error) {
         console.error('Delete Order Error:', error);
-        res
-          .status(500)
-          .json({
-            success: false,
-            message: 'Failed to delete order.',
-            error: error.message,
-          });
+        res.status(500).json({
+          success: false,
+          message: 'Failed to delete order.',
+          error: error.message,
+        });
       }
     });
 
@@ -1309,13 +1403,475 @@ async function run() {
         res.json({ success: true, message: 'Order cancelled successfully.' });
       } catch (error) {
         console.error('Cancel Order Error:', error);
-        res
-          .status(500)
-          .json({
+        res.status(500).json({
+          success: false,
+          message: 'Failed to cancel order.',
+          error: error.message,
+        });
+      }
+    });
+
+    // 📝 REVIEWS API
+    // 1. GET: All reviews for a book
+    app.get('/api/books/:bookId/reviews', async (req, res) => {
+      try {
+        const { bookId } = req.params;
+
+        if (!ObjectId.isValid(bookId)) {
+          return res.status(400).json({
             success: false,
-            message: 'Failed to cancel order.',
-            error: error.message,
+            message: 'Invalid book ID',
           });
+        }
+
+        const reviews = await reviewsCollection
+          .find({ bookId })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // Get average rating
+        const avgRating =
+          reviews.length > 0
+            ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
+            : 0;
+
+        res.json({
+          success: true,
+          data: reviews,
+          averageRating: avgRating,
+          totalReviews: reviews.length,
+        });
+      } catch (error) {
+        console.error('Get Reviews Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch reviews',
+          error: error.message,
+        });
+      }
+    });
+
+    // 2. POST: Add a review (user can only review if delivered)
+    app.post('/api/books/:bookId/reviews', async (req, res) => {
+      try {
+        const { bookId } = req.params;
+        const { userId, userEmail, userName, rating, comment } = req.body;
+
+        //  Validation
+        if (!userId || !userEmail) {
+          return res.status(401).json({
+            success: false,
+            message: 'Please login to review',
+          });
+        }
+
+        if (!rating || rating < 1 || rating > 5) {
+          return res.status(400).json({
+            success: false,
+            message: 'Rating must be between 1 and 5',
+          });
+        }
+
+        if (!comment || comment.trim().length < 3) {
+          return res.status(400).json({
+            success: false,
+            message: 'Comment must be at least 3 characters',
+          });
+        }
+
+        if (!ObjectId.isValid(bookId)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid book ID',
+          });
+        }
+
+        //  Check if user has delivered this book
+        const order = await paymentCollection.findOne({
+          bookId: bookId,
+          customerEmail: userEmail,
+          status: 'Delivered',
+        });
+
+        if (!order) {
+          return res.status(403).json({
+            success: false,
+            message: 'You can only review books you have received',
+          });
+        }
+
+        //  Check if user already reviewed this book
+        const existingReview = await reviewsCollection.findOne({
+          bookId,
+          userEmail,
+        });
+
+        if (existingReview) {
+          return res.status(400).json({
+            success: false,
+            message: 'You have already reviewed this book',
+          });
+        }
+
+        //  Get book details
+        const book = await booksCollection.findOne({
+          _id: new ObjectId(bookId),
+        });
+
+        //  Create review
+        const newReview = {
+          bookId,
+          bookTitle: book?.title || 'Unknown Book',
+          bookCover: book?.coverImage || null,
+          userId,
+          userEmail,
+          userName: userName || userEmail.split('@')[0],
+          rating: parseInt(rating),
+          comment: comment.trim(),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+
+        const result = await reviewsCollection.insertOne(newReview);
+
+        res.status(201).json({
+          success: true,
+          message: 'Review added successfully!',
+          data: { ...newReview, _id: result.insertedId },
+        });
+      } catch (error) {
+        console.error('Add Review Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to add review',
+          error: error.message,
+        });
+      }
+    });
+
+    // 3. PATCH: Update a review
+    app.patch('/api/reviews/:reviewId', async (req, res) => {
+      try {
+        const { reviewId } = req.params;
+        const { rating, comment, userEmail } = req.body;
+
+        if (!ObjectId.isValid(reviewId)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid review ID',
+          });
+        }
+
+        //  Check if review exists and belongs to user
+        const review = await reviewsCollection.findOne({
+          _id: new ObjectId(reviewId),
+        });
+
+        if (!review) {
+          return res.status(404).json({
+            success: false,
+            message: 'Review not found',
+          });
+        }
+
+        if (review.userEmail !== userEmail) {
+          return res.status(403).json({
+            success: false,
+            message: 'You can only edit your own reviews',
+          });
+        }
+
+        //  Update review
+        const updateData = {};
+        if (rating) updateData.rating = parseInt(rating);
+        if (comment) updateData.comment = comment.trim();
+        updateData.updatedAt = new Date().toISOString();
+
+        await reviewsCollection.updateOne(
+          { _id: new ObjectId(reviewId) },
+          { $set: updateData },
+        );
+
+        res.json({
+          success: true,
+          message: 'Review updated successfully!',
+        });
+      } catch (error) {
+        console.error('Update Review Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update review',
+          error: error.message,
+        });
+      }
+    });
+
+    // 4. DELETE: Delete a review
+    app.delete('/api/reviews/:reviewId', async (req, res) => {
+      try {
+        const { reviewId } = req.params;
+        const { userEmail } = req.body;
+
+        if (!ObjectId.isValid(reviewId)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid review ID',
+          });
+        }
+
+        //  Check if review exists and belongs to user
+        const review = await reviewsCollection.findOne({
+          _id: new ObjectId(reviewId),
+        });
+
+        if (!review) {
+          return res.status(404).json({
+            success: false,
+            message: 'Review not found',
+          });
+        }
+
+        if (review.userEmail !== userEmail) {
+          return res.status(403).json({
+            success: false,
+            message: 'You can only delete your own reviews',
+          });
+        }
+
+        await reviewsCollection.deleteOne({
+          _id: new ObjectId(reviewId),
+        });
+
+        res.json({
+          success: true,
+          message: 'Review deleted successfully!',
+        });
+      } catch (error) {
+        console.error('Delete Review Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to delete review',
+          error: error.message,
+        });
+      }
+    });
+
+    // 5. GET: User's all reviews
+    app.get('/api/user/reviews', async (req, res) => {
+      try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail is required',
+          });
+        }
+
+        const reviews = await reviewsCollection
+          .find({ userEmail: userEmail.trim().toLowerCase() })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        res.json({
+          success: true,
+          data: reviews,
+          total: reviews.length,
+        });
+      } catch (error) {
+        console.error('Get User Reviews Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch reviews',
+          error: error.message,
+        });
+      }
+    });
+
+    //  WISHLIST API
+    // 1. GET: User's wishlist
+    app.get('/api/user/wishlist', async (req, res) => {
+      try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail is required',
+          });
+        }
+
+        const wishlist = await wishlistCollection
+          .find({ userEmail: userEmail.trim().toLowerCase() })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // Enrich with book details
+        const enrichedWishlist = await Promise.all(
+          wishlist.map(async (item) => {
+            let book = null;
+            if (item.bookId) {
+              try {
+                book = await booksCollection.findOne({
+                  _id: new ObjectId(item.bookId),
+                });
+              } catch (e) {}
+            }
+
+            return {
+              _id: item._id,
+              bookId: item.bookId,
+              book: book || {
+                title: item.bookTitle || 'Unknown Book',
+                author: 'Unknown',
+                price: 0,
+                deliveryFee: 0,
+                coverImage: null,
+                category: 'General',
+                status: 'Unknown',
+              },
+              addedAt: item.createdAt || new Date().toISOString(),
+            };
+          }),
+        );
+
+        res.json({
+          success: true,
+          data: enrichedWishlist,
+          total: enrichedWishlist.length,
+        });
+      } catch (error) {
+        console.error('Get Wishlist Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch wishlist',
+          error: error.message,
+        });
+      }
+    });
+
+    // 2. POST: Add to wishlist
+    app.post('/api/user/wishlist', async (req, res) => {
+      try {
+        const { userEmail, userId, bookId, bookTitle } = req.body;
+
+        if (!userEmail || !bookId) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail and bookId are required',
+          });
+        }
+
+        // Check if already in wishlist
+        const existing = await wishlistCollection.findOne({
+          userEmail: userEmail.trim().toLowerCase(),
+          bookId: bookId,
+        });
+
+        if (existing) {
+          return res.status(400).json({
+            success: false,
+            message: 'Book already in wishlist',
+          });
+        }
+
+        // Get book details
+        const book = await booksCollection.findOne({
+          _id: new ObjectId(bookId),
+        });
+
+        const wishlistItem = {
+          userId: userId || null,
+          userEmail: userEmail.trim().toLowerCase(),
+          bookId: bookId,
+          bookTitle: book?.title || bookTitle || 'Unknown Book',
+          bookCover: book?.coverImage || null,
+          createdAt: new Date().toISOString(),
+        };
+
+        await wishlistCollection.insertOne(wishlistItem);
+
+        res.json({
+          success: true,
+          message: 'Book added to wishlist!',
+        });
+      } catch (error) {
+        console.error('Add Wishlist Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to add to wishlist',
+          error: error.message,
+        });
+      }
+    });
+
+    // 3. DELETE: Remove from wishlist
+    app.delete('/api/user/wishlist/:bookId', async (req, res) => {
+      try {
+        const { bookId } = req.params;
+        const { userEmail } = req.body;
+
+        if (!userEmail || !bookId) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail and bookId are required',
+          });
+        }
+
+        const result = await wishlistCollection.deleteOne({
+          userEmail: userEmail.trim().toLowerCase(),
+          bookId: bookId,
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'Book not found in wishlist',
+          });
+        }
+
+        res.json({
+          success: true,
+          message: 'Book removed from wishlist!',
+        });
+      } catch (error) {
+        console.error('Remove Wishlist Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to remove from wishlist',
+          error: error.message,
+        });
+      }
+    });
+
+    // 4. CHECK: Check if book is in wishlist
+    app.get('/api/user/wishlist/check', async (req, res) => {
+      try {
+        const { userEmail, bookId } = req.query;
+
+        if (!userEmail || !bookId) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail and bookId are required',
+          });
+        }
+
+        const exists = await wishlistCollection.findOne({
+          userEmail: userEmail.trim().toLowerCase(),
+          bookId: bookId,
+        });
+
+        res.json({
+          success: true,
+          inWishlist: !!exists,
+        });
+      } catch (error) {
+        console.error('Check Wishlist Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to check wishlist',
+          error: error.message,
+        });
       }
     });
 
