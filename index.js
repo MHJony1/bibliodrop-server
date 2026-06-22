@@ -1026,6 +1026,248 @@ async function run() {
       }
     });
 
+    // 👤 USER DASHBOARD API
+
+    // 1. GET: User Overview Stats
+    app.get('/api/user/overview', async (req, res) => {
+      try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail is required.',
+          });
+        }
+
+        // 1. Get all payments/orders by this user
+        const orders = await paymentCollection
+          .find({ customerEmail: userEmail.trim().toLowerCase() })
+          .toArray();
+
+        // 2. Calculate stats
+        const totalBooksRead = orders.filter(
+          (o) => o.status === 'Delivered',
+        ).length;
+        const pendingDeliveries = orders.filter(
+          (o) => o.status === 'Pending' || o.status === 'Dispatched',
+        ).length;
+        const totalSpent = orders
+          .filter(
+            (o) =>
+              o.status === 'Delivered' ||
+              o.status === 'Pending' ||
+              o.status === 'Dispatched',
+          )
+          .reduce((sum, o) => sum + (o.amountPaid || 0), 0);
+
+        // 3. Monthly activity data (last 6 months)
+        const monthlyData = [];
+        const months = [
+          'Jan',
+          'Feb',
+          'Mar',
+          'Apr',
+          'May',
+          'Jun',
+          'Jul',
+          'Aug',
+          'Sep',
+          'Oct',
+          'Nov',
+          'Dec',
+        ];
+        const currentMonth = new Date().getMonth();
+
+        for (let i = 5; i >= 0; i--) {
+          const monthIndex = (currentMonth - i + 12) % 12;
+          const monthOrders = orders.filter((o) => {
+            const date = new Date(o.createdAt);
+            return (
+              date.getMonth() === monthIndex &&
+              date.getFullYear() === new Date().getFullYear()
+            );
+          });
+
+          monthlyData.push({
+            month: months[monthIndex],
+            books: monthOrders.length,
+            spent: monthOrders.reduce((sum, o) => sum + (o.amountPaid || 0), 0),
+          });
+        }
+
+        res.json({
+          success: true,
+          data: {
+            totalBooksRead,
+            pendingDeliveries,
+            totalSpent,
+            monthlyData,
+            orders: orders || [],
+          },
+        });
+      } catch (error) {
+        console.error('User Overview API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch user overview',
+          error: error.message,
+        });
+      }
+    });
+
+    // 2. GET: User Delivery History
+    app.get('/api/user/deliveries', async (req, res) => {
+      try {
+        const { userEmail } = req.query;
+
+        if (!userEmail) {
+          return res.status(400).json({
+            success: false,
+            message: 'userEmail is required.',
+          });
+        }
+
+        const deliveries = await paymentCollection
+          .find({ customerEmail: userEmail.trim().toLowerCase() })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        // Enrich with book details
+        const enrichedDeliveries = await Promise.all(
+          deliveries.map(async (delivery) => {
+            let bookTitle = delivery.bookTitle || 'Unknown Book';
+            let coverImage = null;
+            let author = 'Unknown';
+
+            if (delivery.bookId) {
+              try {
+                const book = await booksCollection.findOne({
+                  _id: new ObjectId(delivery.bookId),
+                });
+                if (book) {
+                  bookTitle = book.title || bookTitle;
+                  coverImage = book.coverImage || null;
+                  author = book.author || author;
+                }
+              } catch (e) {}
+            }
+
+            return {
+              _id: delivery._id,
+              bookTitle,
+              coverImage,
+              author,
+              amount: delivery.amountPaid || 0,
+              status: delivery.status || 'Pending',
+              date: delivery.createdAt || new Date().toISOString(),
+              bookId: delivery.bookId,
+            };
+          }),
+        );
+
+        res.json({
+          success: true,
+          data: enrichedDeliveries,
+          total: enrichedDeliveries.length,
+        });
+      } catch (error) {
+        console.error('User Deliveries API Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to fetch deliveries',
+          error: error.message,
+        });
+      }
+    });
+
+    // 👤 USER DELIVERY HISTORY API
+   app.get('/api/user/deliveries', async (req, res) => {
+  try {
+    const { userEmail } = req.query;
+    
+    console.log('🔍 ===== USER DELIVERY API CALLED =====');
+    console.log('📧 User Email:', userEmail);
+
+    if (!userEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'userEmail is required.'
+      });
+    }
+
+    // ✅ Find orders
+    const orders = await paymentCollection
+      .find({ customerEmail: userEmail.trim().toLowerCase() })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    console.log('📦 Orders Found:', orders.length);
+
+    if (orders.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        total: 0
+      });
+    }
+
+    // ✅ Log first order
+    console.log('📋 Sample Order:', JSON.stringify({
+      _id: orders[0]._id,
+      bookTitle: orders[0].bookTitle,
+      amountPaid: orders[0].amountPaid,
+      status: orders[0].status,
+      bookId: orders[0].bookId,
+    }, null, 2));
+
+    // ✅ Enrich orders
+    const enrichedDeliveries = orders.map(order => ({
+      _id: order._id,
+      transactionId: `TXN-${order._id.toString().slice(-8).toUpperCase()}`,
+      bookTitle: order.bookTitle || 'Unknown Book',
+      coverImage: null,
+      author: 'Unknown',
+      totalFee: order.amountPaid || 0,
+      amountPaid: order.amountPaid || 0,
+      status: order.status || 'Pending',
+      date: order.createdAt || new Date().toISOString(),
+      bookId: order.bookId || null,
+      customerEmail: order.customerEmail,
+      paymentStatus: order.paymentStatus,
+    }));
+
+    console.log('✅ Enriched Count:', enrichedDeliveries.length);
+    console.log('✅ Sample Enriched:', JSON.stringify({
+      bookTitle: enrichedDeliveries[0]?.bookTitle,
+      totalFee: enrichedDeliveries[0]?.totalFee,
+      amountPaid: enrichedDeliveries[0]?.amountPaid,
+      status: enrichedDeliveries[0]?.status,
+    }, null, 2));
+
+    res.json({
+      success: true,
+      data: enrichedDeliveries,
+      total: enrichedDeliveries.length
+    });
+
+  } catch (error) {
+    console.error('❌ API Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch delivery history',
+      error: error.message
+    });
+  }
+});
+
+
+
+
+
+
+
+
     // stripe payment related api
     app.post('/api/payment-success', async (req, res) => {
       try {
