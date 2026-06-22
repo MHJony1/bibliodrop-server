@@ -6,19 +6,112 @@ const dotenv = require('dotenv');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const cors = require('cors');
 
-// const { createRemoteJWKSet, jwtVerify } = require('jose-cjs');
+const { createRemoteJWKSet, jwtVerify } = require('jose-cjs');
+
 dotenv.config();
 
 const Stripe = require('stripe');
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const uri = process.env.MONGODB_URI;
-const port = process.env.PORT || 5000;
+const port = process.env.PORT ;
 const app = express();
+
+
 
 //middleware
 app.use(cors());
 app.use(express.json());
+
+
+//jwks token api
+const JWKS = createRemoteJWKSet(
+  new URL(`${process.env.CLIENT_URL}/api/auth/jwks`),
+);
+
+
+
+// ✅ Verify Token 
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer")) {
+    return res.status(401).json({ msg: "Unauthorized" });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({ msg: "Unauthorized" });
+  }
+
+  try {
+    const { payload } = await jwtVerify(token, JWKS);
+    
+    // user info attach
+    req.user = {
+      id: payload.sub,
+      email: payload.email,
+      role: payload.role || 'user',
+      name: payload.name,
+    };
+
+    next();
+  } catch (error) {
+    console.error('❌ JWT Error:', error.message);
+    return res.status(401).json({ msg: "Unauthorized" });
+  }
+};
+
+// ✅ Role-based Middleware Functions
+const verifyUser = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Authentication required' 
+    });
+  }
+  // All authenticated user allowed (user, librarian, admin)
+  next();
+};
+
+const verifyLibrarian = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Authentication required' 
+    });
+  }
+  
+  const role = req.user.role?.toLowerCase();
+  if (role !== 'librarian' && role !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied. Librarian or Admin role required.'
+    });
+  }
+  next();
+};
+
+const verifyAdmin = (req, res, next) => {
+  if (!req.user) {
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Authentication required' 
+    });
+  }
+  
+  if (req.user.role?.toLowerCase() !== 'admin') {
+    return res.status(403).json({
+      success: false,
+      message: 'Access denied. Admin role required.'
+    });
+  }
+  next();
+};
+
+
+
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -29,10 +122,7 @@ const client = new MongoClient(uri, {
   },
 });
 
-//jwks token api
-// const jwks = createRemoteJWKSet(
-//   new URL(`${process.env.CLIENT_URL}/api/auth/jwks`),
-// );
+
 
 async function run() {
   try {
@@ -196,7 +286,7 @@ async function run() {
     // Librarian Dashboard Related api
 
     // GET: Librarian Books API
-    app.get('/api/librarian/books', async (req, res) => {
+    app.get('/api/librarian/books',verifyToken, verifyLibrarian, async (req, res) => {
       try {
         const { librarianEmail } = req.query;
 
@@ -422,7 +512,7 @@ async function run() {
     });
 
     // GET: Librarian er deliveries for payment collection
-    app.get('/api/librarian/orders', async (req, res) => {
+    app.get('/api/librarian/orders', verifyToken, verifyLibrarian, async (req, res) => {
       try {
         const { librarianEmail } = req.query;
 
@@ -460,7 +550,7 @@ async function run() {
 
         console.log('📦 Orders found:', orders.length);
 
-        // 4. ✅ Enrich orders with book details (ঠিক করা)
+        // 4. ✅ Enrich orders with book details 
         const enrichedOrders = orders.map((order) => {
           // Find the book from librarianBooks array
           const book = librarianBooks.find(
@@ -503,7 +593,7 @@ async function run() {
     });
 
     // PATCH: Delivery status update
-    app.patch('/api/orders/:orderId/status', async (req, res) => {
+    app.patch('/api/orders/:orderId/status',  async (req, res) => {
       try {
         const { orderId } = req.params;
         const { status } = req.body;
@@ -560,7 +650,7 @@ async function run() {
     });
 
     //  Librarian Overview API
-    app.get('/api/librarian/overview', async (req, res) => {
+    app.get('/api/librarian/overview', verifyToken, verifyLibrarian, async (req, res) => {
       try {
         const { librarianEmail } = req.query;
 
@@ -625,7 +715,7 @@ async function run() {
     });
 
     //  API to fetch dashboard card metrics and chart data for Admin Overview
-    app.get('/api/admin/overview', async (req, res) => {
+    app.get('/api/admin/overview', verifyToken, verifyAdmin, async (req, res) => {
       try {
         // 1. Fetch total document counts for summary cards
         const totalUsers = await usersCollection.countDocuments();
@@ -751,7 +841,7 @@ async function run() {
     });
 
     // 🎯 API to approve and publish a book, making it publicly available
-    app.patch('/api/admin/books/:id/approve', async (req, res) => {
+    app.patch('/api/admin/books/:id/approve', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         const result = await booksCollection.updateOne(
@@ -771,7 +861,7 @@ async function run() {
     });
 
     // 🎯 API to permanently delete a book by admin
-    app.delete('/api/admin/books/:id', async (req, res) => {
+    app.delete('/api/admin/books/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         const result = await booksCollection.deleteOne({
@@ -793,7 +883,7 @@ async function run() {
 
     // Admin dashboard api for manage users page
     // 1. GET: for all users
-    app.get('/api/admin/users', async (req, res) => {
+    app.get('/api/admin/users', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const users = await usersCollection.find().toArray();
         res.json({ success: true, data: users });
@@ -803,7 +893,7 @@ async function run() {
     });
 
     // 2. PATCH: user role change
-    app.patch('/api/admin/users/:id/role', async (req, res) => {
+    app.patch('/api/admin/users/:id/role', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         const { role } = req.body;
@@ -818,7 +908,7 @@ async function run() {
     });
 
     // 3. DELETE: user delete
-    app.delete('/api/admin/users/:id', async (req, res) => {
+    app.delete('/api/admin/users/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         await usersCollection.deleteOne({ _id: new ObjectId(id) });
@@ -829,7 +919,7 @@ async function run() {
     });
 
     // 1. Get All Books
-    app.get('/api/admin/books', async (req, res) => {
+    app.get('/api/admin/books', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const books = await booksCollection.find().toArray();
         res.json({ success: true, data: books });
@@ -839,7 +929,7 @@ async function run() {
     });
 
     // 2. Toggle Book Status (Published <-> Unpublished)
-    app.patch('/api/admin/books/:id/toggle', async (req, res) => {
+    app.patch('/api/admin/books/:id/toggle', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         const { status } = req.body;
@@ -854,7 +944,7 @@ async function run() {
     });
 
     // 3. Delete Book
-    app.delete('/api/admin/books/:id', async (req, res) => {
+    app.delete('/api/admin/books/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         await booksCollection.deleteOne({ _id: new ObjectId(id) });
@@ -867,7 +957,7 @@ async function run() {
     // 📊 TRANSACTIONS API (Admin)
 
     // 1. GET: All Transactions for Admin
-    app.get('/api/admin/transactions', async (req, res) => {
+    app.get('/api/admin/transactions', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const transactions = await paymentCollection
           .find()
@@ -926,7 +1016,7 @@ async function run() {
     });
 
     // 2. GET: Single Transaction by ID
-    app.get('/api/admin/transactions/:id', async (req, res) => {
+    app.get('/api/admin/transactions/:id', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
 
@@ -988,7 +1078,7 @@ async function run() {
     });
 
     // 3. PATCH: Update Transaction Delivery Status
-    app.patch('/api/admin/transactions/:id/status', async (req, res) => {
+    app.patch('/api/admin/transactions/:id/status', verifyToken, verifyAdmin, async (req, res) => {
       try {
         const { id } = req.params;
         const { status } = req.body;
@@ -1054,7 +1144,7 @@ async function run() {
     // 👤 USER DASHBOARD API
 
     // 1. GET: User Overview Stats
-    app.get('/api/user/overview', async (req, res) => {
+    app.get('/api/user/overview', verifyToken, verifyUser,  async (req, res) => {
       try {
         const { userEmail } = req.query;
 
@@ -1142,7 +1232,7 @@ async function run() {
     });
 
     // 2. 👤 USER DELIVERY HISTORY API
-    app.get('/api/user/deliveries', async (req, res) => {
+    app.get('/api/user/deliveries', verifyToken, verifyUser,  async (req, res) => {
       try {
         const { userEmail } = req.query;
 
@@ -1235,7 +1325,7 @@ async function run() {
     });
 
     // GET /api/user/reading-list
-    app.get('/api/user/reading-list', async (req, res) => {
+    app.get('/api/user/reading-list', verifyToken, verifyUser,   async (req, res) => {
       try {
         const { userEmail } = req.query;
 
@@ -1313,7 +1403,7 @@ async function run() {
     });
 
     //user order cancel and delete actions api
-    app.delete('/api/user/orders/:orderId', async (req, res) => {
+    app.delete('/api/user/orders/:orderId', verifyToken, verifyUser,   async (req, res) => {
       try {
         const { orderId } = req.params;
 
@@ -1357,7 +1447,7 @@ async function run() {
     });
 
     // PATCH: User order cancel
-    app.patch('/api/user/orders/:orderId/cancel', async (req, res) => {
+    app.patch('/api/user/orders/:orderId/cancel',  verifyToken, verifyUser,   async (req, res) => {
       try {
         const { orderId } = req.params;
 
@@ -1411,9 +1501,9 @@ async function run() {
       }
     });
 
-    // 📝 REVIEWS API
+    //  REVIEWS API
     // 1. GET: All reviews for a book
-    app.get('/api/books/:bookId/reviews', async (req, res) => {
+    app.get('/api/books/:bookId/reviews',  async (req, res) => {
       try {
         const { bookId } = req.params;
 
@@ -1452,7 +1542,7 @@ async function run() {
     });
 
     // 2. POST: Add a review (user can only review if delivered)
-    app.post('/api/books/:bookId/reviews', async (req, res) => {
+    app.post('/api/books/:bookId/reviews',  verifyToken, verifyUser,   async (req, res) => {
       try {
         const { bookId } = req.params;
         const { userId, userEmail, userName, rating, comment } = req.body;
@@ -1550,7 +1640,7 @@ async function run() {
     });
 
     // 3. PATCH: Update a review
-    app.patch('/api/reviews/:reviewId', async (req, res) => {
+    app.patch('/api/reviews/:reviewId',  verifyToken, verifyUser,  async (req, res) => {
       try {
         const { reviewId } = req.params;
         const { rating, comment, userEmail } = req.body;
@@ -1607,7 +1697,7 @@ async function run() {
     });
 
     // 4. DELETE: Delete a review
-    app.delete('/api/reviews/:reviewId', async (req, res) => {
+    app.delete('/api/reviews/:reviewId',  verifyToken, verifyUser,  async (req, res) => {
       try {
         const { reviewId } = req.params;
         const { userEmail } = req.body;
@@ -1690,7 +1780,7 @@ async function run() {
 
     //  WISHLIST API
     // 1. GET: User's wishlist
-    app.get('/api/user/wishlist', async (req, res) => {
+    app.get('/api/user/wishlist',  async (req, res) => {
       try {
         const { userEmail } = req.query;
 
@@ -1751,7 +1841,7 @@ async function run() {
     });
 
     // 2. POST: Add to wishlist
-    app.post('/api/user/wishlist', async (req, res) => {
+    app.post('/api/user/wishlist',  verifyToken, verifyUser,  async (req, res) => {
       try {
         const { userEmail, userId, bookId, bookTitle } = req.body;
 
@@ -1806,7 +1896,7 @@ async function run() {
     });
 
     // 3. DELETE: Remove from wishlist
-    app.delete('/api/user/wishlist/:bookId', async (req, res) => {
+    app.delete('/api/user/wishlist/:bookId',  verifyToken, verifyUser,  async (req, res) => {
       try {
         const { bookId } = req.params;
         const { userEmail } = req.body;
@@ -1845,7 +1935,7 @@ async function run() {
     });
 
     // 4. CHECK: Check if book is in wishlist
-    app.get('/api/user/wishlist/check', async (req, res) => {
+    app.get('/api/user/wishlist/check',  async (req, res) => {
       try {
         const { userEmail, bookId } = req.query;
 
