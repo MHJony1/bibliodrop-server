@@ -53,12 +53,11 @@ const verifyToken = async (req, res, next) => {
 
     next();
   } catch (error) {
-    console.error('❌ JWT Error:', error.message);
     return res.status(401).json({ msg: 'Unauthorized' });
   }
 };
 
-// ✅ Role-based Middleware Functions
+// Role-based Middleware Functions
 const verifyUser = (req, res, next) => {
   if (!req.user) {
     return res.status(401).json({
@@ -66,7 +65,6 @@ const verifyUser = (req, res, next) => {
       message: 'Authentication required',
     });
   }
-  // All authenticated user allowed (user, librarian, admin)
   next();
 };
 
@@ -168,7 +166,7 @@ async function run() {
           if (maxPrice) filter.price.$lte = parseFloat(maxPrice);
         }
 
-        // ✅ Availability filter
+        //  Availability filter
         if (availability === 'available') {
           filter.status = { $in: ['Published', 'Available'] };
         } else if (availability === 'checked_out') {
@@ -996,6 +994,38 @@ async function run() {
         }
       },
     );
+
+    //  Block/Unblock User
+    app.patch('/api/admin/users/:id/block',verifyToken, verifyAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { isBlocked } = req.body;
+
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: { isBlocked: isBlocked || false, updatedAt: new Date() } },
+        );
+
+        if (result.matchedCount === 0) {
+          return res.status(404).json({
+            success: false,
+            message: 'User not found.',
+          });
+        }
+
+        res.json({
+          success: true,
+          message: `User ${isBlocked ? 'blocked' : 'unblocked'} successfully.`,
+        });
+      } catch (error) {
+        console.error('Block User Error:', error);
+        res.status(500).json({
+          success: false,
+          message: 'Failed to update user status.',
+          error: error.message,
+        });
+      }
+    });
 
     // 📊 TRANSACTIONS API (Admin)
 
